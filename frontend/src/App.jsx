@@ -176,7 +176,7 @@ export default function App() {
 
     const socket = io("/", {
       path: "/socket.io",
-      transports: ["polling", "websocket"],
+      transports: ["polling"],
       reconnection: true,
     });
 
