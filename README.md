@@ -14,6 +14,17 @@ TeamSync is an independently developed full-stack collaboration application that
 
 Built with React, Python Flask, PostgreSQL, and Socket.IO, TeamSync demonstrates RESTful API development, relational database design, session-based authentication, and event-driven communication.
 
+## Application Preview
+
+### Authentication
+![TeamSync Login](screenshots/authentication.png)
+
+### Workspace Dashboard
+![TeamSync Dashboard](screenshots/dashboard.png)
+
+### Real-Time Collaboration
+![TeamSync Messaging](screenshots/realtime-messaging.png)
+
 
 ## Features
 
