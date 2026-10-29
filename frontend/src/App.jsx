@@ -216,6 +216,26 @@ export default function App() {
       });
     });
 
+    socket.on("message_updated", (updated) => {
+  if (updated.channel_id !== channelId) return;
+
+  setMessages((prev) =>
+    prev.map((m) =>
+      m.id === updated.id
+        ? { ...m, content: updated.content }
+        : m
+    )
+  );
+});
+
+socket.on("message_deleted", (deleted) => {
+  if (deleted.channel_id !== channelId) return;
+
+  setMessages((prev) =>
+    prev.filter((m) => m.id !== deleted.id)
+  );
+});
+
     socket.on("disconnect", () => setConnected(false));
     socket.on("connect_error", () => setConnected(false));
 
@@ -230,6 +250,52 @@ export default function App() {
       behavior: "smooth",
     });
   }, [messages]);
+
+  async function renameWorkspace() {
+  if (!workspace || workspace.role !== "owner") return;
+
+  const name = window.prompt("New workspace name:", workspace.name);
+  if (!name?.trim() || name.trim() === workspace.name) return;
+
+  try {
+    const updated = await apiRequest(`/workspaces/${workspace.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ name: name.trim() }),
+    });
+
+    setWorkspaces((prev) =>
+      prev.map((w) =>
+        w.id === workspace.id ? { ...w, name: updated.name } : w
+      )
+    );
+    setWorkspace((prev) => ({ ...prev, name: updated.name }));
+    setError("");
+  } catch (err) {
+    setError(err.message);
+  }
+}
+
+async function leaveWorkspace() {
+  if (!workspace || workspace.role === "owner") return;
+
+  if (!window.confirm(`Leave "${workspace.name}"?`)) return;
+
+  try {
+    await apiRequest(`/workspaces/${workspace.id}/leave`, {
+      method: "POST",
+    });
+
+    const remaining = workspaces.filter((w) => w.id !== workspace.id);
+    setWorkspaces(remaining);
+    setWorkspace(remaining[0] || null);
+    setChannels([]);
+    setSelected(null);
+    setMessages([]);
+    setError("");
+  } catch (err) {
+    setError(err.message);
+  }
+}
 
   async function createWorkspace() {
     const name = window.prompt("Workspace name:");
@@ -298,6 +364,61 @@ export default function App() {
     }
   }
 
+
+async function renameChannel(channel) {
+  if (workspace?.role !== "owner") return;
+
+  const name = window.prompt("Rename channel:", channel.name);
+  if (!name?.trim() || name.trim() === channel.name) return;
+
+  try {
+    const updated = await apiRequest(`/channels/${channel.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ name: name.trim() }),
+    });
+
+    setChannels((prev) =>
+      prev.map((c) =>
+        c.id === channel.id ? updated : c
+      )
+    );
+
+    if (selected?.id === channel.id) {
+      setSelected(updated);
+    }
+
+    setError("");
+  } catch (err) {
+    setError(err.message);
+  }
+}
+
+async function deleteChannel(channel) {
+  if (workspace?.role !== "owner") return;
+
+  if (!window.confirm(
+    `Permanently delete #${channel.name} and all its messages?`
+  )) return;
+
+  try {
+    await apiRequest(`/channels/${channel.id}`, {
+      method: "DELETE",
+    });
+
+    const remaining = channels.filter((c) => c.id !== channel.id);
+    setChannels(remaining);
+
+    if (selected?.id === channel.id) {
+      setSelected(remaining[0] || null);
+      setMessages([]);
+    }
+
+    setError("");
+  } catch (err) {
+    setError(err.message);
+  }
+}
+
   async function addChannel() {
     if (!workspace) return;
 
@@ -320,6 +441,45 @@ export default function App() {
       setError(err.message);
     }
   }
+
+
+async function editMessage(msg) {
+  const content = window.prompt("Edit message:", msg.content);
+  if (!content?.trim() || content.trim() === msg.content) return;
+
+  try {
+    const updated = await apiRequest(`/messages/${msg.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ content: content.trim() }),
+    });
+
+    setMessages((prev) =>
+      prev.map((m) =>
+        m.id === updated.id
+          ? { ...m, content: updated.content }
+          : m
+      )
+    );
+    setError("");
+  } catch (err) {
+    setError(err.message);
+  }
+}
+
+async function deleteMessage(msg) {
+  if (!window.confirm("Delete this message permanently?")) return;
+
+  try {
+    await apiRequest(`/messages/${msg.id}`, {
+      method: "DELETE",
+    });
+
+    setMessages((prev) => prev.filter((m) => m.id !== msg.id));
+    setError("");
+  } catch (err) {
+    setError(err.message);
+  }
+}
 
   async function sendMessage(e) {
     e.preventDefault();
@@ -436,6 +596,17 @@ export default function App() {
               <Copy size={14} /> Copy invite code
             </button>
           )}
+          {workspace?.role === "owner" && (
+  <button className="invite-btn" onClick={renameWorkspace}>
+    Rename workspace
+  </button>
+)}
+
+{workspace && workspace.role !== "owner" && (
+  <button className="invite-btn" onClick={leaveWorkspace}>
+    Leave workspace
+  </button>
+)}
         </div>
 
         <div className="channel-heading">
@@ -449,26 +620,46 @@ export default function App() {
           </button>
         </div>
 
-        <nav>
-          {channels.map((channel) => (
-            <button
-              key={channel.id}
-              className={
-                selected?.id === channel.id
-                  ? "channel active"
-                  : "channel"
-              }
-              onClick={() => {
-                setSelected(channel);
-                setMessage("");
-                setError("");
-              }}
-            >
-              <Hash size={17} />
-              {channel.name}
-            </button>
-          ))}
-        </nav>
+        
+<nav>
+  {channels.map((channel) => (
+    <div className="channel-row" key={channel.id}>
+      <button
+        className={
+          selected?.id === channel.id
+            ? "channel active"
+            : "channel"
+        }
+        onClick={() => {
+          setSelected(channel);
+          setMessage("");
+          setError("");
+        }}
+      >
+        <Hash size={17} />
+        {channel.name}
+      </button>
+
+      {workspace?.role === "owner" && (
+        <div className="channel-actions">
+          <button
+            title="Rename channel"
+            onClick={() => renameChannel(channel)}
+          >
+            ✎
+          </button>
+          <button
+            title="Delete channel"
+            onClick={() => deleteChannel(channel)}
+          >
+            ×
+          </button>
+        </div>
+      )}
+    </div>
+  ))}
+</nav>
+
 
         <div className="sidebar-footer">
           <div className="avatar">
@@ -544,7 +735,12 @@ export default function App() {
                     )}
                   </time>
                 </div>
-
+                {m.user_id === user.id && (
+  <div className="message-actions">
+    <button onClick={() => editMessage(m)}>Edit</button>
+    <button onClick={() => deleteMessage(m)}>Delete</button>
+  </div>
+)}
                 <p>{m.content}</p>
               </div>
             </div>

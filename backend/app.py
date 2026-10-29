@@ -458,12 +458,250 @@ def get_workspaces():
         {
             "id": w.id,
             "name": w.name,
+            "owner_id": w.owner_id,
             "role": db.session.get(
                 WorkspaceMember, (w.id, current_user.id)
             ).role
         }
         for w in workspaces
     ])
+
+# Rename workspace - owner only
+@app.patch("/api/workspaces/<int:workspace_id>")
+@login_required
+def rename_workspace(workspace_id):
+    workspace = db.session.get(Workspace, workspace_id)
+
+    if not workspace:
+        return jsonify({"error": "Workspace not found"}), 404
+
+    membership = db.session.get(
+        WorkspaceMember, (workspace_id, current_user.id)
+    )
+
+    if not membership or membership.role != "owner":
+        return jsonify({"error": "Owner access required"}), 403
+
+    data = request.get_json(silent=True) or {}
+    name = str(data.get("name", "")).strip()
+
+    if not name or len(name) > 100:
+        return jsonify({"error": "Invalid workspace name"}), 400
+
+    workspace.name = name
+    db.session.commit()
+
+    return jsonify({"id": workspace.id, "name": workspace.name})
+
+
+# Transfer ownership - owner only
+@app.post("/api/workspaces/<int:workspace_id>/transfer-ownership")
+@login_required
+def transfer_ownership(workspace_id):
+    workspace = db.session.get(Workspace, workspace_id)
+
+    if not workspace:
+        return jsonify({"error": "Workspace not found"}), 404
+
+    if workspace.owner_id != current_user.id:
+        return jsonify({"error": "Owner access required"}), 403
+
+    data = request.get_json(silent=True) or {}
+
+    try:
+        new_owner_id = int(data.get("user_id"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "Valid user ID required"}), 400
+
+    if new_owner_id == current_user.id:
+        return jsonify({"error": "Already the owner"}), 400
+
+    new_owner = db.session.get(
+        WorkspaceMember, (workspace_id, new_owner_id)
+    )
+
+    if not new_owner:
+        return jsonify({
+            "error": "New owner must be a workspace member"
+        }), 400
+
+    old_owner = db.session.get(
+        WorkspaceMember, (workspace_id, current_user.id)
+    )
+
+    if not old_owner:
+        return jsonify({"error": "Owner membership missing"}), 409
+
+    new_owner.role = "owner"
+    old_owner.role = "member"
+    workspace.owner_id = new_owner_id
+
+    db.session.commit()
+
+    return jsonify({"message": "Ownership transferred"})
+
+
+# Leave workspace - members only
+@app.post("/api/workspaces/<int:workspace_id>/leave")
+@login_required
+def leave_workspace(workspace_id):
+    workspace = db.session.get(Workspace, workspace_id)
+
+    if not workspace:
+        return jsonify({"error": "Workspace not found"}), 404
+
+    membership = db.session.get(
+        WorkspaceMember, (workspace_id, current_user.id)
+    )
+
+    if not membership:
+        return jsonify({"error": "Not a workspace member"}), 403
+
+    if workspace.owner_id == current_user.id:
+        return jsonify({
+            "error": "Transfer ownership before leaving"
+        }), 400
+
+    db.session.delete(membership)
+    db.session.commit()
+
+    return jsonify({"message": "Left workspace successfully"})
+
+
+@app.patch("/api/channels/<int:channel_id>")
+@login_required
+def rename_channel(channel_id):
+    channel = db.session.get(Channel, channel_id)
+
+    if not channel:
+        return jsonify({"error": "Channel not found"}), 404
+
+    workspace = db.session.get(Workspace, channel.workspace_id)
+
+    if not workspace or workspace.owner_id != current_user.id:
+        return jsonify({"error": "Owner access required"}), 403
+
+    data = request.get_json(silent=True) or {}
+    name = str(data.get("name", "")).strip()
+
+    if not name or len(name) > 100:
+        return jsonify({"error": "Invalid channel name"}), 400
+
+    existing = db.session.execute(
+        db.select(Channel).where(
+            Channel.workspace_id == channel.workspace_id,
+            Channel.name == name,
+            Channel.id != channel.id
+        )
+    ).scalar_one_or_none()
+
+    if existing:
+        return jsonify({"error": "Channel name already exists"}), 409
+
+    channel.name = name
+    db.session.commit()
+
+    return jsonify({"id": channel.id, "name": channel.name})
+
+
+@app.delete("/api/channels/<int:channel_id>")
+@login_required
+def delete_channel(channel_id):
+    channel = db.session.get(Channel, channel_id)
+
+    if not channel:
+        return jsonify({"error": "Channel not found"}), 404
+
+    workspace = db.session.get(Workspace, channel.workspace_id)
+
+    if not workspace or workspace.owner_id != current_user.id:
+        return jsonify({"error": "Owner access required"}), 403
+
+    # Delete messages before deleting their channel.
+    db.session.execute(
+        db.delete(Message).where(Message.channel_id == channel.id)
+    )
+
+    db.session.delete(channel)
+    db.session.commit()
+
+    return jsonify({"message": "Channel deleted"})
+
+@app.patch("/api/messages/<int:message_id>")
+@login_required
+def edit_message(message_id):
+    msg = db.session.get(Message, message_id)
+
+    if not msg:
+        return jsonify({"error": "Message not found"}), 404
+
+    channel = db.session.get(Channel, msg.channel_id)
+    if (
+        not channel
+        or not is_workspace_member(channel.workspace_id, current_user.id)
+    ):
+        return jsonify({"error": "Access denied"}), 403
+
+    if msg.user_id != current_user.id:
+        return jsonify({"error": "Cannot edit another user's message"}), 403
+
+    data = request.get_json(silent=True) or {}
+    content = str(data.get("content", "")).strip()
+
+    if not content or len(content) > 5000:
+        return jsonify({"error": "Invalid message"}), 400
+
+    msg.content = content
+    db.session.commit()
+
+    result = {
+        "id": msg.id,
+        "content": msg.content,
+        "channel_id": msg.channel_id
+    }
+
+    socketio.emit(
+        "message_updated",
+        result,
+        to=f"channel_{msg.channel_id}"
+    )
+
+    return jsonify(result)
+
+
+@app.delete("/api/messages/<int:message_id>")
+@login_required
+def delete_message(message_id):
+    msg = db.session.get(Message, message_id)
+
+    if not msg:
+        return jsonify({"error": "Message not found"}), 404
+
+    channel = db.session.get(Channel, msg.channel_id)
+    if (
+        not channel
+        or not is_workspace_member(channel.workspace_id, current_user.id)
+    ):
+        return jsonify({"error": "Access denied"}), 403
+
+    if msg.user_id != current_user.id:
+        return jsonify({"error": "Cannot delete another user's message"}), 403
+
+    result = {
+        "id": msg.id,
+        "channel_id": msg.channel_id
+    }
+
+    db.session.delete(msg)
+    db.session.commit()
+
+    socketio.emit(
+        "message_deleted",
+        result,
+        to=f"channel_{result['channel_id']}"
+    )
+
+    return jsonify({"message": "Deleted"})
 
 if __name__ == "__main__":
     socketio.run(app, debug=True, port=5000, allow_unsafe_werkzeug=True)
