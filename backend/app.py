@@ -1,5 +1,6 @@
 
 import os
+import secrets
 
 from flask import Flask, jsonify, request
 from flask_cors import CORS
@@ -12,6 +13,7 @@ from sqlalchemy.engine import URL
 from werkzeug.security import generate_password_hash, check_password_hash
 from models import db, User, Channel, Message
 from flask_socketio import SocketIO, join_room
+from models import Workspace, WorkspaceMember
 
 load_dotenv()
 
@@ -55,7 +57,15 @@ def handle_join(data):
     except (KeyError, TypeError, ValueError):
         return
 
-    if db.session.get(Channel, channel_id):
+    channel = db.session.get(Channel, channel_id)
+
+    if (
+        channel
+        and channel.workspace_id is not None
+        and is_workspace_member(
+            channel.workspace_id, current_user.id
+        )
+    ):
         join_room(f"channel_{channel_id}")
 
 login_manager = LoginManager()
@@ -249,6 +259,15 @@ def send_message(channel_id):
     if not channel:
         return jsonify({"error": "Channel not found"}), 404
 
+        if (
+        channel.workspace_id is None
+        or not is_workspace_member(
+            channel.workspace_id, current_user.id
+        )
+    ):
+         return jsonify({"error": "Access denied"}), 403
+    
+
     data = request.get_json(silent=True) or {}
     content = str(data.get("content", "")).strip()
 
@@ -281,6 +300,170 @@ def send_message(channel_id):
     )
 
     return jsonify(message_data), 201
+
+
+def is_workspace_member(workspace_id, user_id):
+    return db.session.get(
+        WorkspaceMember, (workspace_id, user_id)
+    ) is not None
+
+
+@app.post("/api/workspaces")
+@login_required
+def create_workspace():
+    data = request.get_json(silent=True) or {}
+    name = str(data.get("name", "")).strip()
+
+    if not name or len(name) > 100:
+        return jsonify({"error": "Invalid workspace name"}), 400
+
+    workspace = Workspace(
+        name=name,
+        owner_id=current_user.id,
+        invite_code=secrets.token_urlsafe(18)
+    )
+
+    db.session.add(workspace)
+    db.session.flush()
+
+    db.session.add(WorkspaceMember(
+        workspace_id=workspace.id,
+        user_id=current_user.id,
+        role="owner"
+    ))
+
+    db.session.add(Channel(
+        name="general",
+        workspace_id=workspace.id
+    ))
+
+    db.session.commit()
+
+    return jsonify({
+        "id": workspace.id,
+        "name": workspace.name,
+        "invite_code": workspace.invite_code
+    }), 201
+
+
+@app.post("/api/workspaces/join")
+@login_required
+def join_workspace():
+    data = request.get_json(silent=True) or {}
+    code = str(data.get("invite_code", "")).strip()
+
+    workspace = db.session.execute(
+        db.select(Workspace).filter_by(invite_code=code)
+    ).scalar_one_or_none()
+
+    if not workspace:
+        return jsonify({"error": "Invalid invite code"}), 404
+
+    if not is_workspace_member(workspace.id, current_user.id):
+        db.session.add(WorkspaceMember(
+            workspace_id=workspace.id,
+            user_id=current_user.id,
+            role="member"
+        ))
+        db.session.commit()
+
+    return jsonify({
+        "id": workspace.id,
+        "name": workspace.name
+    })
+
+
+@app.get("/api/workspaces/<int:workspace_id>/invite")
+@login_required
+def get_invite_code(workspace_id):
+    workspace = db.session.get(Workspace, workspace_id)
+
+    if not workspace:
+        return jsonify({"error": "Workspace not found"}), 404
+
+    membership = db.session.get(
+        WorkspaceMember, (workspace_id, current_user.id)
+    )
+
+    if not membership or membership.role != "owner":
+        return jsonify({"error": "Owner access required"}), 403
+
+    return jsonify({"invite_code": workspace.invite_code})
+
+
+@app.get("/api/workspaces/<int:workspace_id>/channels")
+@login_required
+def get_workspace_channels(workspace_id):
+    if not is_workspace_member(workspace_id, current_user.id):
+        return jsonify({"error": "Access denied"}), 403
+
+    channels = db.session.execute(
+        db.select(Channel)
+        .filter_by(workspace_id=workspace_id)
+        .order_by(Channel.id)
+    ).scalars().all()
+
+    return jsonify([
+        {"id": c.id, "name": c.name}
+        for c in channels
+    ])
+
+
+@app.post("/api/workspaces/<int:workspace_id>/channels")
+@login_required
+def create_workspace_channel(workspace_id):
+    if not is_workspace_member(workspace_id, current_user.id):
+        return jsonify({"error": "Access denied"}), 403
+
+    data = request.get_json(silent=True) or {}
+    name = str(data.get("name", "")).strip()
+
+    if not name or len(name) > 100:
+        return jsonify({"error": "Invalid channel name"}), 400
+
+    existing = db.session.execute(
+        db.select(Channel).filter_by(
+            workspace_id=workspace_id,
+            name=name
+        )
+    ).scalar_one_or_none()
+
+    if existing:
+        return jsonify({"error": "Channel already exists"}), 409
+
+    channel = Channel(
+        name=name,
+        workspace_id=workspace_id
+    )
+
+    db.session.add(channel)
+    db.session.commit()
+
+    return jsonify({
+        "id": channel.id,
+        "name": channel.name
+    }), 201
+
+@app.get("/api/workspaces")
+@login_required
+def get_workspaces():
+    workspaces = db.session.execute(
+        db.select(Workspace)
+        .join(WorkspaceMember)
+        .where(WorkspaceMember.user_id == current_user.id)
+        .order_by(Workspace.id)
+    ).scalars().all()
+    
+    return jsonify([
+        {
+            "id": w.id,
+            "name": w.name,
+            "role": db.session.get(
+                WorkspaceMember, (w.id, current_user.id)
+            ).role
+        }
+        for w in workspaces
+    ])
 
 if __name__ == "__main__":
     socketio.run(app, debug=True, port=5000, allow_unsafe_werkzeug=True)

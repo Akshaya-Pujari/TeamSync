@@ -1,129 +1,155 @@
 
 import { useEffect, useRef, useState } from "react";
-import { Hash, Plus, Send, Users } from "lucide-react";
+import {
+  Hash, Plus, Send, Users, Copy, LogOut
+} from "lucide-react";
 import { io } from "socket.io-client";
 import Auth from "./Auth";
 import "./App.css";
 
 const API = "/api";
 
+async function apiRequest(path, options = {}) {
+  const response = await fetch(`${API}${path}`, {
+    credentials: "include",
+    ...options,
+    headers: {
+      "Content-Type": "application/json",
+      ...options.headers,
+    },
+  });
+
+  const data = await response.json();
+
+  if (!response.ok) {
+    throw new Error(data.error || "Request failed");
+  }
+
+  return data;
+}
+
 export default function App() {
+  const [user, setUser] = useState(null);
+  const [checkingAuth, setCheckingAuth] = useState(true);
+
+  const [workspaces, setWorkspaces] = useState([]);
+  const [workspace, setWorkspace] = useState(null);
   const [channels, setChannels] = useState([]);
   const [selected, setSelected] = useState(null);
+
   const [messages, setMessages] = useState([]);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
-  const [user, setUser] = useState(null);
-  const [checkingAuth, setCheckingAuth] = useState(true);
   const [connected, setConnected] = useState(false);
   const [sending, setSending] = useState(false);
 
   const selectedRef = useRef(null);
   const messagesEndRef = useRef(null);
 
-  // Check authentication once.
   useEffect(() => {
-    let active = true;
-
-    fetch(`${API}/auth/me`, {
-      credentials: "include",
-    })
-      .then((res) => {
-        if (!res.ok) throw new Error("Authentication check failed");
-        return res.json();
-      })
-      .then((data) => {
-        if (active) setUser(data.user);
-      })
-      .catch(() => {
-        if (active) setUser(null);
-      })
-      .finally(() => {
-        if (active) setCheckingAuth(false);
-      });
-
-    return () => {
-      active = false;
-    };
+    apiRequest("/auth/me")
+      .then((data) => setUser(data.user))
+      .catch(() => setUser(null))
+      .finally(() => setCheckingAuth(false));
   }, []);
 
-  // Load channels and restore the last selected channel.
+  // Load workspaces after login.
   useEffect(() => {
     if (!user) return;
 
     let active = true;
 
-    async function loadChannels() {
-      try {
-        const res = await fetch(`${API}/channels`, {
-          credentials: "include",
-        });
-
-        if (!res.ok) throw new Error("Failed to load channels");
-
-        const data = await res.json();
+    apiRequest("/workspaces")
+      .then((data) => {
         if (!active) return;
 
-        setChannels(data);
+        setWorkspaces(data);
 
         const savedId = Number(
-          localStorage.getItem(`teamsync_channel_${user.id}`)
+          localStorage.getItem(`teamsync_workspace_${user.id}`)
         );
 
-        const savedChannel = data.find(
-          (channel) => channel.id === savedId
+        setWorkspace(
+          data.find((w) => w.id === savedId) || data[0] || null
         );
-
-        setSelected(savedChannel || data[0] || null);
-        setError("");
-      } catch {
-        if (active) setError("Cannot connect to backend");
-      }
-    }
-
-    loadChannels();
+      })
+      .catch((err) => {
+        if (active) setError(err.message);
+      });
 
     return () => {
       active = false;
     };
   }, [user]);
 
-  // Remember the current channel.
+  // Load workspace channels.
+  useEffect(() => {
+    if (!workspace || !user) {
+      setChannels([]);
+      setSelected(null);
+      return;
+    }
+
+    let active = true;
+
+    localStorage.setItem(
+      `teamsync_workspace_${user.id}`,
+      String(workspace.id)
+    );
+
+    setSelected(null);
+    setMessages([]);
+
+    apiRequest(`/workspaces/${workspace.id}/channels`)
+      .then((data) => {
+        if (!active) return;
+
+        setChannels(data);
+
+        const savedId = Number(
+          localStorage.getItem(
+            `teamsync_channel_${user.id}_${workspace.id}`
+          )
+        );
+
+        setSelected(
+          data.find((c) => c.id === savedId) || data[0] || null
+        );
+      })
+      .catch((err) => {
+        if (active) setError(err.message);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [workspace, user]);
+
   useEffect(() => {
     selectedRef.current = selected;
 
-    if (user && selected) {
+    if (user && workspace && selected) {
       localStorage.setItem(
-        `teamsync_channel_${user.id}`,
+        `teamsync_channel_${user.id}_${workspace.id}`,
         String(selected.id)
       );
     }
-  }, [selected, user]);
+  }, [selected, workspace, user]);
 
-  // Load messages whenever the channel changes.
+  // Load saved messages.
   useEffect(() => {
-    if (!user || !selected) return;
+    if (!selected || !user) return;
 
     let active = true;
     const channelId = selected.id;
 
     setMessages([]);
 
-    async function loadMessages() {
-      try {
-        const res = await fetch(
-          `${API}/channels/${channelId}/messages`,
-          { credentials: "include" }
-        );
-
-        if (!res.ok) throw new Error("Failed to load messages");
-
-        const data = await res.json();
-
+    apiRequest(`/channels/${channelId}/messages`)
+      .then((data) => {
         if (active) {
           setMessages((prev) => {
             const merged = new Map();
-
             data.forEach((m) => merged.set(m.id, m));
             prev.forEach((m) => merged.set(m.id, m));
 
@@ -131,24 +157,20 @@ export default function App() {
               (a, b) => a.id - b.id
             );
           });
-
-          setError("");
         }
-      } catch {
-        if (active) setError("Could not load messages");
-      }
-    }
-
-    loadMessages();
+      })
+      .catch((err) => {
+        if (active) setError(err.message);
+      });
 
     return () => {
       active = false;
     };
   }, [selected, user]);
 
-  // Real-time Socket.IO connection.
+  // Real-time messages.
   useEffect(() => {
-    if (!user || !selected) return;
+    if (!selected || !user) return;
 
     const channelId = selected.id;
 
@@ -156,31 +178,21 @@ export default function App() {
       path: "/socket.io",
       transports: ["polling", "websocket"],
       reconnection: true,
-      reconnectionAttempts: Infinity,
     });
 
     socket.on("connect", () => {
-      console.log("Socket connected:", socket.id);
       setConnected(true);
 
       socket.emit("join_channel", {
         channel_id: channelId,
       });
 
-      // Refresh messages after reconnecting.
-      fetch(`${API}/channels/${channelId}/messages`, {
-        credentials: "include",
-      })
-        .then((res) => {
-          if (!res.ok) throw new Error("Refresh failed");
-          return res.json();
-        })
+      apiRequest(`/channels/${channelId}/messages`)
         .then((data) => {
           if (selectedRef.current?.id !== channelId) return;
 
           setMessages((prev) => {
             const merged = new Map();
-
             data.forEach((m) => merged.set(m.id, m));
             prev.forEach((m) => merged.set(m.id, m));
 
@@ -189,16 +201,14 @@ export default function App() {
             );
           });
         })
-        .catch((err) => console.error(err));
+        .catch(console.error);
     });
 
     socket.on("new_message", (incoming) => {
       if (incoming.channel_id !== channelId) return;
 
       setMessages((prev) => {
-        if (prev.some((m) => m.id === incoming.id)) {
-          return prev;
-        }
+        if (prev.some((m) => m.id === incoming.id)) return prev;
 
         return [...prev, incoming].sort(
           (a, b) => a.id - b.id
@@ -206,32 +216,115 @@ export default function App() {
       });
     });
 
-    socket.on("disconnect", () => {
-      setConnected(false);
-    });
-
-    socket.on("connect_error", (err) => {
-      console.error("Socket connection failed:", err.message);
-      setConnected(false);
-    });
+    socket.on("disconnect", () => setConnected(false));
+    socket.on("connect_error", () => setConnected(false));
 
     return () => {
       socket.disconnect();
       setConnected(false);
     };
-  }, [user, selected]);
+  }, [selected, user]);
 
-  // Scroll to the newest message.
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({
       behavior: "smooth",
     });
   }, [messages]);
 
+  async function createWorkspace() {
+    const name = window.prompt("Workspace name:");
+    if (!name?.trim()) return;
+
+    try {
+      const created = await apiRequest("/workspaces", {
+        method: "POST",
+        body: JSON.stringify({ name: name.trim() }),
+      });
+
+      const newWorkspace = {
+        id: created.id,
+        name: created.name,
+        role: "owner",
+      };
+
+      setWorkspaces((prev) => [...prev, newWorkspace]);
+      setWorkspace(newWorkspace);
+      setError("");
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
+  async function joinWorkspace() {
+    const invite_code = window.prompt("Enter workspace invite code:");
+    if (!invite_code?.trim()) return;
+
+    try {
+      const joined = await apiRequest("/workspaces/join", {
+        method: "POST",
+        body: JSON.stringify({
+          invite_code: invite_code.trim(),
+        }),
+      });
+
+      const existing = workspaces.find((w) => w.id === joined.id);
+
+      if (!existing) {
+        setWorkspaces((prev) => [
+          ...prev,
+          { ...joined, role: "member" },
+        ]);
+      }
+
+      setWorkspace(existing || { ...joined, role: "member" });
+      setError("");
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
+  async function copyInviteCode() {
+    if (!workspace) return;
+
+    try {
+      const data = await apiRequest(
+        `/workspaces/${workspace.id}/invite`
+      );
+
+      await navigator.clipboard.writeText(data.invite_code);
+      window.alert("Invite code copied!");
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
+  async function addChannel() {
+    if (!workspace) return;
+
+    const name = window.prompt("Channel name:");
+    if (!name?.trim()) return;
+
+    try {
+      const created = await apiRequest(
+        `/workspaces/${workspace.id}/channels`,
+        {
+          method: "POST",
+          body: JSON.stringify({ name: name.trim() }),
+        }
+      );
+
+      setChannels((prev) => [...prev, created]);
+      setSelected(created);
+      setError("");
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
   async function sendMessage(e) {
     e.preventDefault();
 
-    if (!message.trim() || !selected || sending) return;
+    if (!selected || !message.trim() || sending) return;
 
     const content = message.trim();
     const channelId = selected.id;
@@ -239,85 +332,46 @@ export default function App() {
     setSending(true);
 
     try {
-      const res = await fetch(
-        `${API}/channels/${channelId}/messages`,
+      const saved = await apiRequest(
+        `/channels/${channelId}/messages`,
         {
           method: "POST",
-          credentials: "include",
-          headers: {
-            "Content-Type": "application/json",
-          },
           body: JSON.stringify({ content }),
         }
       );
 
-      if (!res.ok) throw new Error("Message failed");
-
-      const saved = await res.json();
-
-      // Immediate display, even if Socket.IO is disconnected.
       if (selectedRef.current?.id === channelId) {
-        setMessages((prev) => {
-          if (prev.some((m) => m.id === saved.id)) return prev;
-          return [...prev, saved].sort((a, b) => a.id - b.id);
-        });
+        setMessages((prev) =>
+          prev.some((m) => m.id === saved.id)
+            ? prev
+            : [...prev, saved]
+        );
       }
 
       setMessage("");
       setError("");
-    } catch {
-      setError("Failed to send message");
+    } catch (err) {
+      setError(err.message);
     } finally {
       setSending(false);
     }
   }
 
-  async function addChannel() {
-    const name = window.prompt("Enter channel name:");
-    if (!name?.trim()) return;
-
-    try {
-      const res = await fetch(`${API}/channels`, {
-        method: "POST",
-        credentials: "include",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ name: name.trim() }),
-      });
-
-      const data = await res.json();
-
-      if (!res.ok) {
-        throw new Error(data.error || "Could not create channel");
-      }
-
-      setChannels((prev) => [...prev, data]);
-      setSelected(data);
-      setMessage("");
-      setError("");
-    } catch (err) {
-      setError(err.message);
-    }
-  }
-
   async function logout() {
     try {
-      const res = await fetch(`${API}/auth/logout`, {
+      await apiRequest("/auth/logout", {
         method: "POST",
-        credentials: "include",
       });
 
-      if (!res.ok) throw new Error("Logout failed");
-
       setUser(null);
+      setWorkspaces([]);
+      setWorkspace(null);
       setChannels([]);
       setSelected(null);
       setMessages([]);
-      setMessage("");
       setError("");
-    } catch {
-      setError("Could not log out. Please try again.");
+    } catch (err) {
+      setError(err.message);
     }
   }
 
@@ -340,17 +394,56 @@ export default function App() {
           </div>
         </div>
 
-        <div className="workspace">
-          <Users size={18} />
-          <span>My Workspace</span>
+        <div className="workspace-controls">
+          <label>YOUR WORKSPACE</label>
+
+          <select
+            className="workspace-select"
+            value={workspace?.id || ""}
+            onChange={(e) => {
+              const next = workspaces.find(
+                (w) => w.id === Number(e.target.value)
+              );
+              setWorkspace(next || null);
+            }}
+          >
+            {workspaces.length === 0 && (
+              <option value="">No workspaces yet</option>
+            )}
+
+            {workspaces.map((w) => (
+              <option key={w.id} value={w.id}>
+                {w.name}
+              </option>
+            ))}
+          </select>
+
+          <div className="workspace-actions">
+            <button onClick={createWorkspace}>
+              <Plus size={14} /> Create
+            </button>
+
+            <button onClick={joinWorkspace}>
+              <Users size={14} /> Join
+            </button>
+          </div>
+
+          {workspace?.role === "owner" && (
+            <button
+              className="invite-btn"
+              onClick={copyInviteCode}
+            >
+              <Copy size={14} /> Copy invite code
+            </button>
+          )}
         </div>
 
         <div className="channel-heading">
           <span>CHANNELS</span>
           <button
             onClick={addChannel}
+            disabled={!workspace}
             title="Add channel"
-            aria-label="Add channel"
           >
             <Plus size={18} />
           </button>
@@ -384,11 +477,17 @@ export default function App() {
 
           <div>
             <strong>{user.username}</strong>
-            <small>{connected ? "Live" : "Connecting..."}</small>
+            <small>
+              {connected ? "Live" : "Offline"}
+            </small>
           </div>
 
-          <button className="logout-btn" onClick={logout}>
-            Log out
+          <button
+            className="logout-btn"
+            onClick={logout}
+            title="Log out"
+          >
+            <LogOut size={16} />
           </button>
         </div>
       </aside>
@@ -398,21 +497,33 @@ export default function App() {
           <div>
             <h2>
               <Hash size={23} />
-              {selected?.name || "Select a channel"}
+              {selected?.name || "Welcome to TeamSync"}
             </h2>
-            <p>Team conversations, all in one place.</p>
+            <p>
+              {workspace
+                ? `${workspace.name} · Team conversations`
+                : "Create or join a workspace to begin."}
+            </p>
           </div>
 
           <span className="demo-tag">
-            {connected ? "Live collaboration" : "Connecting..."}
+            {connected ? "Live collaboration" : "TeamSync"}
           </span>
         </header>
 
         <section className="messages">
-          {messages.length === 0 && (
+          {!workspace && (
+            <div className="empty">
+              <Users size={38} />
+              <h3>Your workspace starts here.</h3>
+              <p>Create a workspace or join one with an invite code.</p>
+            </div>
+          )}
+
+          {workspace && messages.length === 0 && (
             <div className="empty">
               <Hash size={38} />
-              <h3>Start the conversation</h3>
+              <h3>Start the conversation.</h3>
               <p>Send the first message in this channel.</p>
             </div>
           )}
@@ -429,10 +540,7 @@ export default function App() {
                   <time>
                     {new Date(m.created_at).toLocaleTimeString(
                       [],
-                      {
-                        hour: "2-digit",
-                        minute: "2-digit",
-                      }
+                      { hour: "2-digit", minute: "2-digit" }
                     )}
                   </time>
                 </div>
@@ -463,14 +571,13 @@ export default function App() {
             <button
               type="submit"
               disabled={!selected || !message.trim() || sending}
-              aria-label="Send message"
             >
               <Send size={19} />
             </button>
           </form>
 
           <p className="hint">
-            Messages are saved in PostgreSQL.
+            Secure workspace conversations · PostgreSQL
           </p>
         </div>
       </main>

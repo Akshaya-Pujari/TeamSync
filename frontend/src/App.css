@@ -439,3 +439,69 @@ button {
   color: #b34836;
   margin: 0;
 }
+
+
+.workspace-controls {
+  padding: 25px 18px;
+  border-bottom: 1px solid #426162;
+}
+
+.workspace-controls label {
+  display: block;
+  font-size: 10px;
+  letter-spacing: 1.8px;
+  color: #bdccca;
+  margin-bottom: 12px;
+}
+
+.workspace-select {
+  width: 100%;
+  padding: 12px;
+  background: #34595a;
+  border: 1px solid #64807d;
+  color: #f0eee8;
+  border-radius: 3px;
+  font-family: inherit;
+  font-size: 13px;
+}
+
+.workspace-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.workspace-actions button,
+.invite-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 10px;
+  background: transparent;
+  color: #f0eee8;
+  border: 1px solid #64807d;
+  border-radius: 3px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.workspace-actions button {
+  flex: 1;
+}
+
+.workspace-actions button:hover,
+.invite-btn:hover {
+  background: #34595a;
+}
+
+.invite-btn {
+  width: 100%;
+  margin-top: 10px;
+  color: #e9b19e;
+}
+
+.workspace-controls button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}

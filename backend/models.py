@@ -15,9 +15,44 @@ class User(UserMixin, db.Model):
     password_hash = db.Column(db.String(255))
 
 
+class Workspace(db.Model):
+    __tablename__ = "workspaces"
+
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(100), nullable=False)
+    invite_code = db.Column(
+        db.String(32), unique=True, nullable=False
+    )
+    owner_id = db.Column(
+        db.Integer, db.ForeignKey("users.id"), nullable=False
+    )
+
+
+class WorkspaceMember(db.Model):
+    __tablename__ = "workspace_members"
+
+    workspace_id = db.Column(
+        db.Integer,
+        db.ForeignKey("workspaces.id"),
+        primary_key=True
+    )
+    user_id = db.Column(
+        db.Integer,
+        db.ForeignKey("users.id"),
+        primary_key=True
+    )
+    role = db.Column(
+        db.String(20), nullable=False, default="member"
+    )
+
 class Channel(db.Model):
     __tablename__ = "channels"
 
+    workspace_id = db.Column(
+    db.Integer,
+    db.ForeignKey("workspaces.id"),
+    nullable=True
+)
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(100), unique=True, nullable=False)
 
